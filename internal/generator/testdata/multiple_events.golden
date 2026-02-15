@@ -29,6 +29,10 @@ type envelope struct {
 
 // New creates an EventBus with the given channel buffer size.
 func New(size int) *EventBus {
+	if size < 1 {
+		size = 1
+	}
+
 	return &EventBus{
 		subscribers: newSubscribersMap(),
 		ch:          make(chan envelope, size),
@@ -75,7 +79,11 @@ func (bus *EventBus) SubscribeAlertFired(fn func(AlertEvent)) {
 	defer bus.mu.Unlock()
 
 	bus.subscribers[EventAlertFired] = append(bus.subscribers[EventAlertFired], func(v any) {
-		fn(v.(AlertEvent))
+		payload, ok := v.(AlertEvent)
+		if !ok {
+			return
+		}
+		fn(payload)
 	})
 }
 
@@ -90,7 +98,11 @@ func (bus *EventBus) SubscribeOrderPlaced(fn func(OrderEvent)) {
 	defer bus.mu.Unlock()
 
 	bus.subscribers[EventOrderPlaced] = append(bus.subscribers[EventOrderPlaced], func(v any) {
-		fn(v.(OrderEvent))
+		payload, ok := v.(OrderEvent)
+		if !ok {
+			return
+		}
+		fn(payload)
 	})
 }
 
@@ -105,7 +117,11 @@ func (bus *EventBus) SubscribeUserCreated(fn func(UserEvent)) {
 	defer bus.mu.Unlock()
 
 	bus.subscribers[EventUserCreated] = append(bus.subscribers[EventUserCreated], func(v any) {
-		fn(v.(UserEvent))
+		payload, ok := v.(UserEvent)
+		if !ok {
+			return
+		}
+		fn(payload)
 	})
 }
 

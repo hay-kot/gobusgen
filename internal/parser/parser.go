@@ -33,13 +33,17 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 	)
 
 	for pkgName, pkg := range pkgs {
+		consts := collectStringConsts(pkg.Files)
+
 		for _, file := range pkg.Files {
-			// Skip generated files
 			if isGeneratedFile(file) {
 				continue
 			}
 
-			events, ok := findMapVar(file, varName)
+			events, ok, extractErr := findMapVar(file, varName, consts)
+			if extractErr != nil {
+				return model.GenerateInput{}, fmt.Errorf("variable %s: %w", varName, extractErr)
+			}
 			if !ok {
 				continue
 			}
@@ -73,11 +77,11 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 	}, nil
 }
 
-// isGeneratedFile checks for the standard "Code generated" comment.
+// isGeneratedFile checks for the standard Go generated file header.
 func isGeneratedFile(file *ast.File) bool {
 	for _, cg := range file.Comments {
 		for _, c := range cg.List {
-			if strings.Contains(c.Text, "Code generated") {
+			if strings.Contains(c.Text, "Code generated") && strings.Contains(c.Text, "DO NOT EDIT") {
 				return true
 			}
 		}
@@ -85,10 +89,88 @@ func isGeneratedFile(file *ast.File) bool {
 	return false
 }
 
+// collectStringConsts scans all files for const declarations with string values.
+// Returns a map from const name to unquoted string value.
+func collectStringConsts(files map[string]*ast.File) map[string]string {
+	consts := make(map[string]string)
+
+	for _, file := range files {
+		for _, decl := range file.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok || genDecl.Tok != token.CONST {
+				continue
+			}
+
+			for _, spec := range genDecl.Specs {
+				vs, ok := spec.(*ast.ValueSpec)
+				if !ok || len(vs.Names) == 0 || len(vs.Values) == 0 {
+					continue
+				}
+
+				lit, ok := vs.Values[0].(*ast.BasicLit)
+				if !ok || lit.Kind != token.STRING {
+					continue
+				}
+
+				val, err := strconv.Unquote(lit.Value)
+				if err != nil {
+					continue
+				}
+
+				consts[vs.Names[0].Name] = val
+			}
+		}
+	}
+
+	return consts
+}
+
+// resolveStringKey extracts the string value from a map key expression.
+// Supports string literals, bare const references, and string() conversions.
+func resolveStringKey(key ast.Expr, consts map[string]string) (string, error) {
+	switch k := key.(type) {
+	case *ast.BasicLit:
+		if k.Kind != token.STRING {
+			return "", fmt.Errorf("map key must be a string literal, got %s", k.Kind)
+		}
+		return strconv.Unquote(k.Value)
+
+	case *ast.Ident:
+		val, ok := consts[k.Name]
+		if !ok {
+			return "", fmt.Errorf("constant %q not found in package; only package-level string constants are supported", k.Name)
+		}
+		return val, nil
+
+	case *ast.CallExpr:
+		// Handle string(ConstName) conversion
+		fnIdent, ok := k.Fun.(*ast.Ident)
+		if !ok || fnIdent.Name != "string" || len(k.Args) != 1 {
+			return "", fmt.Errorf("map key must be a string literal, constant, or string() conversion")
+		}
+
+		argIdent, ok := k.Args[0].(*ast.Ident)
+		if !ok {
+			return "", fmt.Errorf("map key must be a string literal, constant, or string() conversion")
+		}
+
+		val, ok := consts[argIdent.Name]
+		if !ok {
+			return "", fmt.Errorf("constant %q not found in package; only package-level string constants are supported", argIdent.Name)
+		}
+		return val, nil
+
+	default:
+		return "", fmt.Errorf("map key must be a string literal, constant, or string() conversion")
+	}
+}
+
 // findMapVar looks for a top-level var declaration matching:
 //
 //	var <varName> = map[string]any{ ... }
-func findMapVar(file *ast.File, varName string) ([]model.EventDef, bool) {
+//
+// Returns the extracted events, whether the variable was found, and any extraction error.
+func findMapVar(file *ast.File, varName string, consts map[string]string) ([]model.EventDef, bool, error) {
 	for _, decl := range file.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok || genDecl.Tok != token.VAR {
@@ -114,16 +196,16 @@ func findMapVar(file *ast.File, varName string) ([]model.EventDef, bool) {
 				continue
 			}
 
-			events, err := extractEvents(comp)
+			events, err := extractEvents(comp, consts)
 			if err != nil {
-				continue
+				return nil, true, err
 			}
 
-			return events, true
+			return events, true, nil
 		}
 	}
 
-	return nil, false
+	return nil, false, nil
 }
 
 // isMapStringAny checks if the expression is map[string]any.
@@ -147,7 +229,7 @@ func isMapStringAny(expr ast.Expr) bool {
 }
 
 // extractEvents pulls event name and payload type from each key-value pair.
-func extractEvents(comp *ast.CompositeLit) ([]model.EventDef, error) {
+func extractEvents(comp *ast.CompositeLit, consts map[string]string) ([]model.EventDef, error) {
 	var events []model.EventDef
 
 	for _, elt := range comp.Elts {
@@ -156,14 +238,9 @@ func extractEvents(comp *ast.CompositeLit) ([]model.EventDef, error) {
 			return nil, fmt.Errorf("expected key-value expression")
 		}
 
-		keyLit, ok := kv.Key.(*ast.BasicLit)
-		if !ok || keyLit.Kind != token.STRING {
-			return nil, fmt.Errorf("map key must be a string literal")
-		}
-
-		name, err := strconv.Unquote(keyLit.Value)
+		name, err := resolveStringKey(kv.Key, consts)
 		if err != nil {
-			return nil, fmt.Errorf("unquoting map key %s: %w", keyLit.Value, err)
+			return nil, err
 		}
 
 		valComp, ok := kv.Value.(*ast.CompositeLit)
@@ -197,11 +274,15 @@ func typeExprToString(expr ast.Expr) (string, error) {
 		}
 		return pkg.Name + "." + t.Sel.Name, nil
 	default:
-		return "", fmt.Errorf("unsupported type expression %T", expr)
+		return "", fmt.Errorf("unsupported type expression; only simple types like MyType or pkg.Type are supported")
 	}
 }
 
 func validate(events []model.EventDef) error {
+	if len(events) == 0 {
+		return fmt.Errorf("event map contains no event definitions")
+	}
+
 	seen := make(map[string]bool, len(events))
 	symbols := make(map[string]string, len(events)) // normalized symbol -> original name
 
@@ -210,10 +291,8 @@ func validate(events []model.EventDef) error {
 			return fmt.Errorf("event name must not be empty")
 		}
 
-		for _, r := range e.Name {
-			if unicode.IsSpace(r) {
-				return fmt.Errorf("event name %q contains whitespace", e.Name)
-			}
+		if strings.ContainsFunc(e.Name, unicode.IsSpace) {
+			return fmt.Errorf("event name %q contains whitespace", e.Name)
 		}
 
 		if seen[e.Name] {
@@ -221,7 +300,7 @@ func validate(events []model.EventDef) error {
 		}
 		seen[e.Name] = true
 
-		sym := normalizeName(e.Name)
+		sym := model.PascalCase(e.Name)
 		if prev, ok := symbols[sym]; ok {
 			return fmt.Errorf("event names %q and %q produce the same generated symbol %q", prev, e.Name, sym)
 		}
@@ -233,27 +312,6 @@ func validate(events []model.EventDef) error {
 	}
 
 	return nil
-}
-
-// normalizeName converts an event name to its PascalCase symbol form,
-// matching the generator template's pascalCase function.
-func normalizeName(s string) string {
-	var b strings.Builder
-	upper := true
-
-	for _, r := range s {
-		switch {
-		case r == '.' || r == '_' || r == '-':
-			upper = true
-		case upper:
-			b.WriteRune(unicode.ToUpper(r))
-			upper = false
-		default:
-			b.WriteRune(r)
-		}
-	}
-
-	return b.String()
 }
 
 func isValidGoIdent(s string) bool {

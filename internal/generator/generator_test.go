@@ -98,7 +98,7 @@ func TestPascalCase(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
-			got := generator.PascalCase(tt.input)
+			got := model.PascalCase(tt.input)
 			if got != tt.want {
 				t.Errorf("PascalCase(%q) = %q, want %q", tt.input, got, tt.want)
 			}

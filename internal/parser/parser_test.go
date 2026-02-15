@@ -3,6 +3,7 @@ package parser_test
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/hay-kot/gobusgen/internal/model"
@@ -254,6 +255,187 @@ var Events = map[string]any{
 			varName: "Events",
 			wantErr: `event name "foo bar" contains whitespace`,
 		},
+		{
+			name: "multiple map variables same name across files",
+			files: map[string]string{
+				"events1.go": `package events
+
+type FooEvent struct{}
+
+var Events = map[string]any{
+	"foo.bar": FooEvent{},
+}
+`,
+				"events2.go": `package events
+
+type BarEvent struct{}
+
+var Events = map[string]any{
+	"bar.baz": BarEvent{},
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `multiple map[string]any variables named "Events" found`,
+		},
+		{
+			name: "empty events map",
+			files: map[string]string{
+				"events.go": `package events
+
+var Events = map[string]any{}
+`,
+			},
+			varName: "Events",
+			wantErr: `event map contains no event definitions`,
+		},
+		{
+			name: "map value is function call not struct literal",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+func makeFoo() FooEvent { return FooEvent{} }
+
+var Events = map[string]any{
+	"foo.bar": makeFoo(),
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `must be a composite literal`,
+		},
+		{
+			name: "map key is bare constant reference",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+const key = "foo.bar"
+
+var Events = map[string]any{
+	key: FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "map key is string conversion of typed constant",
+			files: map[string]string{
+				"events.go": `package events
+
+type EventName string
+type FooEvent struct{}
+
+const key EventName = "foo.bar"
+
+var Events = map[string]any{
+	string(key): FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "mixed literals and constants",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+type BarEvent struct{}
+
+const fooKey = "foo.bar"
+
+var Events = map[string]any{
+	fooKey:      FooEvent{},
+	"bar.baz":   BarEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "bar.baz", PayloadType: "BarEvent"},
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "constant defined in separate file",
+			files: map[string]string{
+				"consts.go": `package events
+
+type EventName string
+
+const RecipeMutation EventName = "recipe.mutation"
+`,
+				"events.go": `package events
+
+type MutationEvent struct{}
+
+var Events = map[string]any{
+	string(RecipeMutation): MutationEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "recipe.mutation", PayloadType: "MutationEvent"},
+				},
+			},
+		},
+		{
+			name: "unknown constant reference",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var Events = map[string]any{
+	UnknownConst: FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `constant "UnknownConst" not found in package`,
+		},
+		{
+			name: "unknown constant in string conversion",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var Events = map[string]any{
+	string(UnknownConst): FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `constant "UnknownConst" not found in package`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -269,7 +451,7 @@ var Events = map[string]any{
 				if err == nil {
 					t.Fatalf("expected error containing %q, got nil", tt.wantErr)
 				}
-				if !contains(err.Error(), tt.wantErr) {
+				if !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("expected error containing %q, got %q", tt.wantErr, err.Error())
 				}
 				return
@@ -301,17 +483,4 @@ var Events = map[string]any{
 			}
 		})
 	}
-}
-
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchStr(s, substr)
-}
-
-func searchStr(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
 }
