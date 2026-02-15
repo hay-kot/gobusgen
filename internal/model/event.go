@@ -15,7 +15,28 @@ type EventDef struct {
 type GenerateInput struct {
 	PackageName string
 	VarName     string // name of the source map variable (e.g. "Events")
+	Prefix      string // prefix for generated symbols (e.g. "Command" → CommandEvent, CommandBus)
 	Events      []EventDef
+}
+
+// DerivePrefix returns a prefix from the var name.
+// Only the "Events" suffix is recognized; everything else uses the var name
+// as-is. Use the //gobusgen:prefix directive to override.
+//
+//	"Events"      → "" (backward compatible)
+//	"OrderEvents" → "Order"
+//	"Commands"    → "Commands"
+//	"MyBus"       → "MyBus"
+func DerivePrefix(varName string) string {
+	if varName == "Events" {
+		return ""
+	}
+
+	if after, ok := strings.CutSuffix(varName, "Events"); ok && after != "" {
+		return after
+	}
+
+	return varName
 }
 
 // PascalCase converts a dotted/underscored/hyphenated name to PascalCase.

@@ -27,9 +27,10 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 	}
 
 	var (
-		found      []model.EventDef
-		foundPkg   string
-		matchCount int
+		found       []model.EventDef
+		foundPkg    string
+		foundPrefix *string
+		matchCount  int
 	)
 
 	for pkgName, pkg := range pkgs {
@@ -40,7 +41,7 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 				continue
 			}
 
-			events, ok, extractErr := findMapVar(file, varName, consts)
+			events, prefix, ok, extractErr := findMapVar(file, varName, consts)
 			if extractErr != nil {
 				return model.GenerateInput{}, fmt.Errorf("variable %s: %w", varName, extractErr)
 			}
@@ -51,6 +52,7 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 			matchCount++
 			found = events
 			foundPkg = pkgName
+			foundPrefix = prefix
 		}
 	}
 
@@ -70,9 +72,15 @@ func Parse(dir string, varName string) (model.GenerateInput, error) {
 		return found[i].Name < found[j].Name
 	})
 
+	prefix := model.DerivePrefix(varName)
+	if foundPrefix != nil {
+		prefix = *foundPrefix
+	}
+
 	return model.GenerateInput{
 		PackageName: foundPkg,
 		VarName:     varName,
+		Prefix:      prefix,
 		Events:      found,
 	}, nil
 }
@@ -192,8 +200,9 @@ func resolveStringKey(key ast.Expr, consts map[string]string) (string, error) {
 //
 //	var <varName> = map[string]any{ ... }
 //
-// Returns the extracted events, whether the variable was found, and any extraction error.
-func findMapVar(file *ast.File, varName string, consts map[string]string) ([]model.EventDef, bool, error) {
+// Returns the extracted events, an optional prefix from a //gobusgen:prefix directive
+// (nil means no directive found), whether the variable was found, and any extraction error.
+func findMapVar(file *ast.File, varName string, consts map[string]string) ([]model.EventDef, *string, bool, error) {
 	for _, decl := range file.Decls {
 		genDecl, ok := decl.(*ast.GenDecl)
 		if !ok || genDecl.Tok != token.VAR {
@@ -221,14 +230,38 @@ func findMapVar(file *ast.File, varName string, consts map[string]string) ([]mod
 
 			events, err := extractEvents(comp, consts)
 			if err != nil {
-				return nil, true, err
+				return nil, nil, true, err
 			}
 
-			return events, true, nil
+			prefix := extractPrefixDirective(genDecl.Doc)
+
+			return events, prefix, true, nil
 		}
 	}
 
-	return nil, false, nil
+	return nil, nil, false, nil
+}
+
+// extractPrefixDirective scans a comment group for a //gobusgen:prefix directive.
+// Returns nil if no directive found, or a pointer to the prefix value.
+func extractPrefixDirective(doc *ast.CommentGroup) *string {
+	if doc == nil {
+		return nil
+	}
+
+	for _, c := range doc.List {
+		text := strings.TrimSpace(c.Text)
+		after, ok := strings.CutPrefix(text, "//gobusgen:prefix")
+		if !ok {
+			continue
+		}
+
+		// "//gobusgen:prefix" with no value means explicit empty prefix
+		val := strings.TrimSpace(after)
+		return &val
+	}
+
+	return nil
 }
 
 // isMapStringAny checks if the expression is map[string]any.

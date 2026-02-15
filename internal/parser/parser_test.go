@@ -219,6 +219,75 @@ var MyBus = map[string]any{
 			want: model.GenerateInput{
 				PackageName: "events",
 				VarName:     "MyBus",
+				Prefix:      "MyBus",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "derive prefix from Commands var name",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var Commands = map[string]any{
+	"foo.bar": FooEvent{},
+}
+`,
+			},
+			varName: "Commands",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Commands",
+				Prefix:      "Commands",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "prefix directive overrides derived",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+//gobusgen:prefix Notification
+var Commands = map[string]any{
+	"foo.bar": FooEvent{},
+}
+`,
+			},
+			varName: "Commands",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Commands",
+				Prefix:      "Notification",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "prefix directive explicit empty",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+//gobusgen:prefix
+var Commands = map[string]any{
+	"foo.bar": FooEvent{},
+}
+`,
+			},
+			varName: "Commands",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Commands",
+				Prefix:      "",
 				Events: []model.EventDef{
 					{Name: "foo.bar", PayloadType: "FooEvent"},
 				},
@@ -549,6 +618,10 @@ var Events = map[string]any{
 
 			if got.VarName != tt.varName {
 				t.Errorf("VarName = %q, want %q", got.VarName, tt.varName)
+			}
+
+			if got.Prefix != tt.want.Prefix {
+				t.Errorf("Prefix = %q, want %q", got.Prefix, tt.want.Prefix)
 			}
 
 			if len(got.Events) != len(tt.want.Events) {

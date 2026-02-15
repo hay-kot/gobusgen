@@ -50,6 +50,18 @@ func TestGenerate(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "prefixed_bus",
+			input: model.GenerateInput{
+				PackageName: "commands",
+				VarName:     "Commands",
+				Prefix:      "Command",
+				Events: []model.EventDef{
+					{Name: "order.create", PayloadType: "CreateOrderCmd"},
+					{Name: "order.cancel", PayloadType: "CancelOrderCmd"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
