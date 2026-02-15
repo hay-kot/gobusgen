@@ -90,7 +90,8 @@ func isGeneratedFile(file *ast.File) bool {
 }
 
 // collectStringConsts scans all files for const declarations with string values.
-// Returns a map from const name to unquoted string value.
+// Returns a map from const name to unquoted string value. Handles multi-name
+// declarations (const A, B = "a", "b") and inherited values in const blocks.
 func collectStringConsts(files map[string]*ast.File) map[string]string {
 	consts := make(map[string]string)
 
@@ -101,28 +102,50 @@ func collectStringConsts(files map[string]*ast.File) map[string]string {
 				continue
 			}
 
+			// Track the last explicit values for inherited const specs.
+			var lastValues []string
+
 			for _, spec := range genDecl.Specs {
 				vs, ok := spec.(*ast.ValueSpec)
-				if !ok || len(vs.Names) == 0 || len(vs.Values) == 0 {
+				if !ok || len(vs.Names) == 0 {
 					continue
 				}
 
-				lit, ok := vs.Values[0].(*ast.BasicLit)
-				if !ok || lit.Kind != token.STRING {
-					continue
+				if len(vs.Values) > 0 {
+					// Explicit values — resolve each one.
+					lastValues = resolveStringValues(vs.Values)
 				}
 
-				val, err := strconv.Unquote(lit.Value)
-				if err != nil {
-					continue
+				// Apply resolved values (explicit or inherited) to names.
+				for i, name := range vs.Names {
+					if i < len(lastValues) {
+						consts[name.Name] = lastValues[i]
+					}
 				}
-
-				consts[vs.Names[0].Name] = val
 			}
 		}
 	}
 
 	return consts
+}
+
+// resolveStringValues extracts unquoted string values from a list of
+// expressions. Non-string entries are represented as empty slots so that
+// positional indexing is preserved for multi-name declarations.
+func resolveStringValues(exprs []ast.Expr) []string {
+	vals := make([]string, len(exprs))
+	for i, expr := range exprs {
+		lit, ok := expr.(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			continue
+		}
+		val, err := strconv.Unquote(lit.Value)
+		if err != nil {
+			continue
+		}
+		vals[i] = val
+	}
+	return vals
 }
 
 // resolveStringKey extracts the string value from a map key expression.
@@ -291,8 +314,8 @@ func validate(events []model.EventDef) error {
 			return fmt.Errorf("event name must not be empty")
 		}
 
-		if strings.ContainsFunc(e.Name, unicode.IsSpace) {
-			return fmt.Errorf("event name %q contains whitespace", e.Name)
+		if r, ok := containsInvalidEventRune(e.Name); ok {
+			return fmt.Errorf("event name %q contains invalid character %q; only letters, digits, dots, hyphens, and underscores are allowed", e.Name, r)
 		}
 
 		if seen[e.Name] {
@@ -336,4 +359,19 @@ func isValidGoIdent(s string) bool {
 	}
 
 	return true
+}
+
+// containsInvalidEventRune returns the first rune in s that is not a letter,
+// digit, or one of the recognized separators (dot, hyphen, underscore).
+func containsInvalidEventRune(s string) (rune, bool) {
+	for _, r := range s {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			continue
+		}
+		if r == '.' || r == '_' || r == '-' {
+			continue
+		}
+		return r, true
+	}
+	return 0, false
 }

@@ -253,7 +253,7 @@ var Events = map[string]any{
 `,
 			},
 			varName: "Events",
-			wantErr: `event name "foo bar" contains whitespace`,
+			wantErr: `event name "foo bar" contains invalid character ' '`,
 		},
 		{
 			name: "multiple map variables same name across files",
@@ -435,6 +435,88 @@ var Events = map[string]any{
 			},
 			varName: "Events",
 			wantErr: `constant "UnknownConst" not found in package`,
+		},
+		{
+			name: "multi-name const declaration",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+type BarEvent struct{}
+
+const keyA, keyB = "foo.bar", "baz.qux"
+
+var Events = map[string]any{
+	keyA: FooEvent{},
+	keyB: BarEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "baz.qux", PayloadType: "BarEvent"},
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "inherited const value in block resolves",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+const (
+	keyA = "foo.bar"
+	keyB
+)
+
+var Events = map[string]any{
+	keyB: FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "event name with colon",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var Events = map[string]any{
+	"user:created": FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `contains invalid character ':'`,
+		},
+		{
+			name: "event name with slash",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var Events = map[string]any{
+	"foo/bar": FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			wantErr: `contains invalid character '/'`,
 		},
 	}
 
