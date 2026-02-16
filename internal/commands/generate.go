@@ -30,12 +30,38 @@ func (cmd *GenerateCmd) Register(app *cli.Command) *cli.Command {
 	app.Commands = append(app.Commands, &cli.Command{
 		Name:                      "generate",
 		Usage:                     "generate type-safe event bus from map variable declaration",
+		UsageText:                 "gobusgen generate [-p <dir>.<Var>] [-o <file>]",
 		DisableSliceFlagSeparator: true,
+		Description: `Reads a Go package for a map[string]any variable and generates typed
+publish/subscribe wrappers for each entry. Map keys are event names and
+values are struct literals used as payload types.
+
+  var Events = map[string]any{
+      "user.created": UserCreatedEvent{},
+      "order.placed": OrderPlacedEvent{},
+  }
+
+Map keys may be string literals, bare constants, string() conversions of
+typed constants, or const aliases that reference other string constants.
+
+The --package flag specifies targets as <dirpath>.<VarName>. When omitted
+it defaults to .Events (current directory, variable named Events).
+
+Output defaults to <dir>/<prefix>bus.gen.go where the prefix is derived
+from the variable name ("Events" → "event", "Commands" → "command").
+Use the //gobusgen:prefix directive to override the prefix:
+
+  //gobusgen:prefix Notification
+  var Commands = map[string]any{ ... }
+
+An empty directive (//gobusgen:prefix) produces no prefix. The directive
+may appear above the var keyword or above the variable name inside a
+grouped var() block.`,
 		Flags: []cli.Flag{
 			&cli.StringSliceFlag{
 				Name:    "package",
 				Aliases: []string{"p"},
-				Usage:   "package target as <dirpath>.<VarName> (repeatable)",
+				Usage:   "package target as <dirpath>.<VarName> (default: .Events)",
 			},
 			&cli.StringFlag{
 				Name:        "output",
