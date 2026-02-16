@@ -44,6 +44,7 @@ func build() string {
 
 	return fmt.Sprintf("%s (%s) %s", version, short, date)
 }
+
 func setupLogger(level string, noColor bool) error {
 	parsedLevel, err := zerolog.ParseLevel(level)
 	if err != nil {
@@ -55,7 +56,7 @@ func setupLogger(level string, noColor bool) error {
 	return nil
 }
 
-func main() {
+func run() (noColor bool, err error) {
 	log.Logger = log.Output(zerolog.ConsoleWriter{Out: os.Stderr})
 
 	flags := &commands.Flags{}
@@ -91,15 +92,19 @@ func main() {
 	app = commands.NewGenerateCmd(flags).Register(app)
 	// +scaffold:command:register
 
-	exitCode := 0
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := app.Run(ctx, os.Args); err != nil {
+	return flags.NoColor, app.Run(ctx, os.Args)
+}
+
+func main() {
+	noColor, err := run()
+	if err != nil {
 		colorRed := "\033[38;2;215;95;107m"
 		colorGray := "\033[38;2;163;163;163m"
 		colorReset := "\033[0m"
-		if flags.NoColor {
+		if noColor {
 			colorRed = ""
 			colorGray = ""
 			colorReset = ""
@@ -109,8 +114,6 @@ func main() {
 			colorRed, colorReset, colorGray, err.Error(), colorReset,
 			colorRed, colorReset,
 		)
-		exitCode = 1
+		os.Exit(1)
 	}
-
-	os.Exit(exitCode)
 }
