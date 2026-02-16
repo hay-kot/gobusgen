@@ -103,31 +103,35 @@ func isGeneratedFile(file *ast.File) bool {
 func collectStringConsts(files map[string]*ast.File) map[string]string {
 	consts := make(map[string]string)
 
-	for _, file := range files {
-		for _, decl := range file.Decls {
-			genDecl, ok := decl.(*ast.GenDecl)
-			if !ok || genDecl.Tok != token.CONST {
-				continue
-			}
-
-			// Track the last explicit values for inherited const specs.
-			var lastValues []string
-
-			for _, spec := range genDecl.Specs {
-				vs, ok := spec.(*ast.ValueSpec)
-				if !ok || len(vs.Names) == 0 {
+	// Two passes: first collects literals and resolves ident references where
+	// the referenced const was already seen. Second pass resolves any remaining
+	// ident references that couldn't resolve due to file iteration order.
+	for range 2 {
+		for _, file := range files {
+			for _, decl := range file.Decls {
+				genDecl, ok := decl.(*ast.GenDecl)
+				if !ok || genDecl.Tok != token.CONST {
 					continue
 				}
 
-				if len(vs.Values) > 0 {
-					// Explicit values — resolve each one.
-					lastValues = resolveStringValues(vs.Values)
-				}
+				// Track the last explicit values for inherited const specs.
+				var lastValues []string
 
-				// Apply resolved values (explicit or inherited) to names.
-				for i, name := range vs.Names {
-					if i < len(lastValues) {
-						consts[name.Name] = lastValues[i]
+				for _, spec := range genDecl.Specs {
+					vs, ok := spec.(*ast.ValueSpec)
+					if !ok || len(vs.Names) == 0 {
+						continue
+					}
+
+					if len(vs.Values) > 0 {
+						lastValues = resolveStringValues(vs.Values, consts)
+					}
+
+					// Apply resolved values (explicit or inherited) to names.
+					for i, name := range vs.Names {
+						if i < len(lastValues) {
+							consts[name.Name] = lastValues[i]
+						}
 					}
 				}
 			}
@@ -140,18 +144,24 @@ func collectStringConsts(files map[string]*ast.File) map[string]string {
 // resolveStringValues extracts unquoted string values from a list of
 // expressions. Non-string entries are represented as empty slots so that
 // positional indexing is preserved for multi-name declarations.
-func resolveStringValues(exprs []ast.Expr) []string {
+func resolveStringValues(exprs []ast.Expr, consts map[string]string) []string {
 	vals := make([]string, len(exprs))
 	for i, expr := range exprs {
-		lit, ok := expr.(*ast.BasicLit)
-		if !ok || lit.Kind != token.STRING {
-			continue
+		switch e := expr.(type) {
+		case *ast.BasicLit:
+			if e.Kind != token.STRING {
+				continue
+			}
+			val, err := strconv.Unquote(e.Value)
+			if err != nil {
+				continue
+			}
+			vals[i] = val
+		case *ast.Ident:
+			if val, ok := consts[e.Name]; ok {
+				vals[i] = val
+			}
 		}
-		val, err := strconv.Unquote(lit.Value)
-		if err != nil {
-			continue
-		}
-		vals[i] = val
 	}
 	return vals
 }
@@ -234,6 +244,9 @@ func findMapVar(file *ast.File, varName string, consts map[string]string) ([]mod
 			}
 
 			prefix := extractPrefixDirective(genDecl.Doc)
+			if prefix == nil {
+				prefix = extractPrefixDirective(vs.Doc)
+			}
 
 			return events, prefix, true, nil
 		}

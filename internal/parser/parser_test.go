@@ -587,6 +587,82 @@ var Events = map[string]any{
 			varName: "Events",
 			wantErr: `contains invalid character '/'`,
 		},
+		{
+			name: "prefix directive in grouped var block",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+var (
+	//gobusgen:prefix Notification
+	Commands = map[string]any{
+		"foo.bar": FooEvent{},
+	}
+)
+`,
+			},
+			varName: "Commands",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Commands",
+				Prefix:      "Notification",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "const alias resolves to referenced const value",
+			files: map[string]string{
+				"events.go": `package events
+
+type FooEvent struct{}
+
+const base = "foo.bar"
+const alias = base
+
+var Events = map[string]any{
+	alias: FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
+		{
+			name: "const alias across files",
+			files: map[string]string{
+				"consts.go": `package events
+
+const base = "foo.bar"
+`,
+				"events.go": `package events
+
+type FooEvent struct{}
+
+const alias = base
+
+var Events = map[string]any{
+	alias: FooEvent{},
+}
+`,
+			},
+			varName: "Events",
+			want: model.GenerateInput{
+				PackageName: "events",
+				VarName:     "Events",
+				Events: []model.EventDef{
+					{Name: "foo.bar", PayloadType: "FooEvent"},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
