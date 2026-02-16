@@ -59,6 +59,12 @@ type {{ $busType }} struct {
 	mu          sync.RWMutex
 	subscribers map[{{ $eventType }}][]any
 	ch          chan {{ $env }}
+
+	hookMu      sync.RWMutex
+	onPublish   []func({{ $eventType }}, any)
+	onDrop      []func({{ $eventType }}, any)
+	onSubscribe []func({{ $eventType }})
+	onPanic     []func({{ $eventType }}, any, any)
 }
 
 type {{ $env }} struct {
@@ -100,9 +106,16 @@ func (bus *{{ $busType }}) Start(ctx context.Context) {
 			bus.mu.RUnlock()
 
 			for _, sub := range subs {
-				if fn, ok := sub.(func(any)); ok {
-					fn(env.payload)
-				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							bus.runOnPanic(env.event, env.payload, r)
+						}
+					}()
+					if fn, ok := sub.(func(any)); ok {
+						fn(env.payload)
+					}
+				}()
 			}
 		}
 	}
@@ -112,14 +125,17 @@ func (bus *{{ $busType }}) Start(ctx context.Context) {
 {{ $pc := pascalCase .Name -}}
 // Publish{{ $pc }} publishes a {{ .Name }} event.
 func (bus *{{ $busType }}) Publish{{ $pc }}(payload {{ .PayloadType }}) {
-	bus.ch <- {{ $env }}{event: {{ $eventType }}{{ $pc }}, payload: payload}
+	select {
+	case bus.ch <- {{ $env }}{event: {{ $eventType }}{{ $pc }}, payload: payload}:
+		bus.runOnPublish({{ $eventType }}{{ $pc }}, payload)
+	default:
+		bus.runOnDrop({{ $eventType }}{{ $pc }}, payload)
+	}
 }
 
 // Subscribe{{ $pc }} registers a handler for {{ .Name }} events.
 func (bus *{{ $busType }}) Subscribe{{ $pc }}(fn func({{ .PayloadType }})) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-
 	bus.subscribers[{{ $eventType }}{{ $pc }}] = append(bus.subscribers[{{ $eventType }}{{ $pc }}], func(v any) {
 		payload, ok := v.({{ .PayloadType }})
 		if !ok {
@@ -127,8 +143,81 @@ func (bus *{{ $busType }}) Subscribe{{ $pc }}(fn func({{ .PayloadType }})) {
 		}
 		fn(payload)
 	})
+	bus.mu.Unlock()
+	bus.runOnSubscribe({{ $eventType }}{{ $pc }})
 }
 {{ end }}
+// OnPublish registers a hook that fires after an event is successfully enqueued.
+func (bus *{{ $busType }}) OnPublish(fn func({{ $eventType }}, any)) {
+	bus.hookMu.Lock()
+	bus.onPublish = append(bus.onPublish, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnDrop registers a hook that fires when an event is dropped due to a full buffer.
+func (bus *{{ $busType }}) OnDrop(fn func({{ $eventType }}, any)) {
+	bus.hookMu.Lock()
+	bus.onDrop = append(bus.onDrop, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnSubscribe registers a hook that fires after a subscriber is registered.
+func (bus *{{ $busType }}) OnSubscribe(fn func({{ $eventType }})) {
+	bus.hookMu.Lock()
+	bus.onSubscribe = append(bus.onSubscribe, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnPanic registers a hook that fires when a subscriber panics.
+func (bus *{{ $busType }}) OnPanic(fn func({{ $eventType }}, any, any)) {
+	bus.hookMu.Lock()
+	bus.onPanic = append(bus.onPanic, fn)
+	bus.hookMu.Unlock()
+}
+
+func (bus *{{ $busType }}) runOnPublish(event {{ $eventType }}, payload any) {
+	bus.hookMu.RLock()
+	hooks := make([]func({{ $eventType }}, any), len(bus.onPublish))
+	copy(hooks, bus.onPublish)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event, payload)
+	}
+}
+
+func (bus *{{ $busType }}) runOnDrop(event {{ $eventType }}, payload any) {
+	bus.hookMu.RLock()
+	hooks := make([]func({{ $eventType }}, any), len(bus.onDrop))
+	copy(hooks, bus.onDrop)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event, payload)
+	}
+}
+
+func (bus *{{ $busType }}) runOnSubscribe(event {{ $eventType }}) {
+	bus.hookMu.RLock()
+	hooks := make([]func({{ $eventType }}), len(bus.onSubscribe))
+	copy(hooks, bus.onSubscribe)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event)
+	}
+}
+
+func (bus *{{ $busType }}) runOnPanic(event {{ $eventType }}, payload any, recovered any) {
+	bus.hookMu.RLock()
+	hooks := make([]func({{ $eventType }}, any, any), len(bus.onPanic))
+	copy(hooks, bus.onPanic)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		func() {
+			defer func() { recover() }()
+			fn(event, payload, recovered)
+		}()
+	}
+}
+
 // Reference the source variable to suppress unused-variable lint.
 var _ = {{ .VarName }}
 `

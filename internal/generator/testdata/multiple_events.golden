@@ -20,6 +20,12 @@ type EventBus struct {
 	mu          sync.RWMutex
 	subscribers map[Event][]any
 	ch          chan envelope
+
+	hookMu      sync.RWMutex
+	onPublish   []func(Event, any)
+	onDrop      []func(Event, any)
+	onSubscribe []func(Event)
+	onPanic     []func(Event, any, any)
 }
 
 type envelope struct {
@@ -60,9 +66,16 @@ func (bus *EventBus) Start(ctx context.Context) {
 			bus.mu.RUnlock()
 
 			for _, sub := range subs {
-				if fn, ok := sub.(func(any)); ok {
-					fn(env.payload)
-				}
+				func() {
+					defer func() {
+						if r := recover(); r != nil {
+							bus.runOnPanic(env.event, env.payload, r)
+						}
+					}()
+					if fn, ok := sub.(func(any)); ok {
+						fn(env.payload)
+					}
+				}()
 			}
 		}
 	}
@@ -70,14 +83,17 @@ func (bus *EventBus) Start(ctx context.Context) {
 
 // PublishAlertFired publishes a alert.fired event.
 func (bus *EventBus) PublishAlertFired(payload AlertEvent) {
-	bus.ch <- envelope{event: EventAlertFired, payload: payload}
+	select {
+	case bus.ch <- envelope{event: EventAlertFired, payload: payload}:
+		bus.runOnPublish(EventAlertFired, payload)
+	default:
+		bus.runOnDrop(EventAlertFired, payload)
+	}
 }
 
 // SubscribeAlertFired registers a handler for alert.fired events.
 func (bus *EventBus) SubscribeAlertFired(fn func(AlertEvent)) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-
 	bus.subscribers[EventAlertFired] = append(bus.subscribers[EventAlertFired], func(v any) {
 		payload, ok := v.(AlertEvent)
 		if !ok {
@@ -85,18 +101,23 @@ func (bus *EventBus) SubscribeAlertFired(fn func(AlertEvent)) {
 		}
 		fn(payload)
 	})
+	bus.mu.Unlock()
+	bus.runOnSubscribe(EventAlertFired)
 }
 
 // PublishOrderPlaced publishes a order.placed event.
 func (bus *EventBus) PublishOrderPlaced(payload OrderEvent) {
-	bus.ch <- envelope{event: EventOrderPlaced, payload: payload}
+	select {
+	case bus.ch <- envelope{event: EventOrderPlaced, payload: payload}:
+		bus.runOnPublish(EventOrderPlaced, payload)
+	default:
+		bus.runOnDrop(EventOrderPlaced, payload)
+	}
 }
 
 // SubscribeOrderPlaced registers a handler for order.placed events.
 func (bus *EventBus) SubscribeOrderPlaced(fn func(OrderEvent)) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-
 	bus.subscribers[EventOrderPlaced] = append(bus.subscribers[EventOrderPlaced], func(v any) {
 		payload, ok := v.(OrderEvent)
 		if !ok {
@@ -104,18 +125,23 @@ func (bus *EventBus) SubscribeOrderPlaced(fn func(OrderEvent)) {
 		}
 		fn(payload)
 	})
+	bus.mu.Unlock()
+	bus.runOnSubscribe(EventOrderPlaced)
 }
 
 // PublishUserCreated publishes a user.created event.
 func (bus *EventBus) PublishUserCreated(payload UserEvent) {
-	bus.ch <- envelope{event: EventUserCreated, payload: payload}
+	select {
+	case bus.ch <- envelope{event: EventUserCreated, payload: payload}:
+		bus.runOnPublish(EventUserCreated, payload)
+	default:
+		bus.runOnDrop(EventUserCreated, payload)
+	}
 }
 
 // SubscribeUserCreated registers a handler for user.created events.
 func (bus *EventBus) SubscribeUserCreated(fn func(UserEvent)) {
 	bus.mu.Lock()
-	defer bus.mu.Unlock()
-
 	bus.subscribers[EventUserCreated] = append(bus.subscribers[EventUserCreated], func(v any) {
 		payload, ok := v.(UserEvent)
 		if !ok {
@@ -123,6 +149,79 @@ func (bus *EventBus) SubscribeUserCreated(fn func(UserEvent)) {
 		}
 		fn(payload)
 	})
+	bus.mu.Unlock()
+	bus.runOnSubscribe(EventUserCreated)
+}
+
+// OnPublish registers a hook that fires after an event is successfully enqueued.
+func (bus *EventBus) OnPublish(fn func(Event, any)) {
+	bus.hookMu.Lock()
+	bus.onPublish = append(bus.onPublish, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnDrop registers a hook that fires when an event is dropped due to a full buffer.
+func (bus *EventBus) OnDrop(fn func(Event, any)) {
+	bus.hookMu.Lock()
+	bus.onDrop = append(bus.onDrop, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnSubscribe registers a hook that fires after a subscriber is registered.
+func (bus *EventBus) OnSubscribe(fn func(Event)) {
+	bus.hookMu.Lock()
+	bus.onSubscribe = append(bus.onSubscribe, fn)
+	bus.hookMu.Unlock()
+}
+
+// OnPanic registers a hook that fires when a subscriber panics.
+func (bus *EventBus) OnPanic(fn func(Event, any, any)) {
+	bus.hookMu.Lock()
+	bus.onPanic = append(bus.onPanic, fn)
+	bus.hookMu.Unlock()
+}
+
+func (bus *EventBus) runOnPublish(event Event, payload any) {
+	bus.hookMu.RLock()
+	hooks := make([]func(Event, any), len(bus.onPublish))
+	copy(hooks, bus.onPublish)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event, payload)
+	}
+}
+
+func (bus *EventBus) runOnDrop(event Event, payload any) {
+	bus.hookMu.RLock()
+	hooks := make([]func(Event, any), len(bus.onDrop))
+	copy(hooks, bus.onDrop)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event, payload)
+	}
+}
+
+func (bus *EventBus) runOnSubscribe(event Event) {
+	bus.hookMu.RLock()
+	hooks := make([]func(Event), len(bus.onSubscribe))
+	copy(hooks, bus.onSubscribe)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		fn(event)
+	}
+}
+
+func (bus *EventBus) runOnPanic(event Event, payload any, recovered any) {
+	bus.hookMu.RLock()
+	hooks := make([]func(Event, any, any), len(bus.onPanic))
+	copy(hooks, bus.onPanic)
+	bus.hookMu.RUnlock()
+	for _, fn := range hooks {
+		func() {
+			defer func() { recover() }()
+			fn(event, payload, recovered)
+		}()
+	}
 }
 
 // Reference the source variable to suppress unused-variable lint.
